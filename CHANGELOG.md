@@ -21,7 +21,7 @@ This project uses simple semantic versioning while the plugin is young:
 ### Verification
 
 - Regression tests cover ingest-time thread creation and naming, anchor reuse without double creation, fallback on creation failure, thread-targeted sends never spawning a nested thread, and reply-reference suppression for the thread anchor (in-turn and via the anchor cache) while normal references are kept.
-- Thread-session behavior deployed and exercised live on a self-hosted Fluxer deployment (threads open per mention, sessions split); the reply-reference fix is covered by regression tests and is pending live confirmation of a clean first delivery.
+- Thread-session behavior verified live on a self-hosted Fluxer deployment: a channel mention opens its own thread and delivers cleanly (no recovery notice), in-thread follow-ups continue that thread's session, and each thread carries its own auto-generated session title; delivery logs show no failures after the fix.
 
 ## [0.5.1] - 2026-10-13
 
