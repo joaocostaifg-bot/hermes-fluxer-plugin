@@ -4043,8 +4043,12 @@ def _apply_yaml_config(yaml_cfg: dict, platform_cfg: dict) -> dict | None:
         "native_command_guilds": "FLUXER_NATIVE_COMMAND_GUILDS",
     }
     for key, env_name in scalar_env.items():
-        if not scoped_load and key in cfg:
-            _set_env_default(env_name, cfg.get(key))
+        # Dict-shaped values (e.g. home_channel: {chat_id, name, platform}) must never be
+        # stringified into FLUXER_* env vars: the env seed below reads them back verbatim,
+        # turning the home chat_id into str(dict) (#home-channel dict poisoning).
+        value = cfg.get(key)
+        if not scoped_load and key in cfg and isinstance(value, (str, int, float, bool)):
+            _set_env_default(env_name, value)
 
     voice_raw = cfg.get("voice")
     voice: dict = voice_raw if isinstance(voice_raw, dict) else {}
