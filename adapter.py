@@ -1247,6 +1247,16 @@ class FluxerAdapter(BasePlatformAdapter):
             or extra.get("reply_to_mode")
             or getattr(config, "reply_to_mode", None)
         )
+        # One session per mention: create the turn's thread at ingest and
+        # dispatch the turn on the thread's own id, so core's thread-scoped
+        # session key gives every @mention in a channel a fresh session whose
+        # follow-ups continue in that thread. Disable with
+        # FLUXER_THREAD_SESSIONS=0 / extra.thread_sessions: false to restore
+        # one shared long-lived channel session.
+        self._thread_sessions = _coerce_bool(
+            _fluxer_env("FLUXER_THREAD_SESSIONS", extra.get("thread_sessions")),
+            True,
+        )
         self._thread_replies_enabled = _coerce_bool(
             _fluxer_env("FLUXER_THREAD_REPLIES", extra.get("thread_replies")),
             False,
@@ -2133,6 +2143,25 @@ class FluxerAdapter(BasePlatformAdapter):
             self._turn_thread_disabled.pop()
         self._turn_thread_disabled.add(key)
 
+    def _turn_target_is_thread(self, chat_id: str) -> bool:
+        """True when ``chat_id`` already IS a thread this turn must not re-thread.
+
+        Covers threads this adapter created at ingest (keyed in
+        ``_thread_parents``) and any other thread the live turn is addressed to
+        (its source carries ``chat_type == "thread"``). Sending there is the
+        reply; opening another thread underneath it is not.
+        """
+        if str(chat_id) in self._thread_parents:
+            return True
+        context = self._turn_context.get()
+        event = context[0] if context else None
+        source = getattr(event, "source", None)
+        return bool(
+            source is not None
+            and str(getattr(source, "chat_id", "")) == str(chat_id)
+            and getattr(source, "chat_type", "") == "thread"
+        )
+
     async def handle_message(self, event: MessageEvent) -> None:
         # Inline commands execute here; spawned work inherits the context.
         marker = self._turn_context.set((event, ""))
@@ -2222,6 +2251,48 @@ class FluxerAdapter(BasePlatformAdapter):
                 self._note_renamed_thread(thread_id, created_name)
             if not title:
                 self._schedule_title_rename(chat_id, thread_id, created_name, author_id)
+        return thread_id
+
+    async def _start_thread_session_from_message(
+        self, chat_id: str, message_id: str, text: str, author_id: Optional[str] = None
+    ) -> Optional[str]:
+        """Ingest-time thread start: one fresh session per mention.
+
+        Creates the turn's thread the moment the trigger message is accepted,
+        BEFORE the gateway resolves the session, and returns the thread id; the
+        caller dispatches the turn on that id. Core then keys the session on
+        the thread (``...:thread:<thread_id>``), and in-thread follow-ups
+        byte-match that key: every mention begins a new conversation instead
+        of continuing the channel's long-lived session, and the auto-title
+        names only this thread. ``None`` keeps the shared channel session
+        (and the send-time auto-thread path) as the fallback.
+        """
+        key = (str(chat_id), str(message_id))
+        existing = self._threads_by_anchor.get(key)
+        if existing:
+            return existing
+        placeholder = _derive_auto_thread_name(text)
+        try:
+            data = await self.create_thread(
+                str(chat_id), placeholder, message_id=str(message_id)
+            )
+        except Exception as exc:
+            logger.debug(
+                "Fluxer ingest thread start failed for %s/%s: %s", chat_id, message_id, exc
+            )
+            return None
+        thread_id = self._remember_thread_id(data, chat_id)
+        if not thread_id:
+            return None
+        self._threads_by_anchor[key] = thread_id
+        self._threads_by_anchor.move_to_end(key)
+        while len(self._threads_by_anchor) > self._threads_by_anchor_max:
+            self._threads_by_anchor.popitem(last=False)
+        created_name = str((data or {}).get("name") or placeholder)
+        # The turn's session is keyed on the thread, so title lookups and
+        # ``/title`` renames must address the thread id, not the parent.
+        self._record_auto_thread(str(thread_id), thread_id, created_name, author_id)
+        self._schedule_title_rename(str(thread_id), thread_id, created_name, author_id)
         return thread_id
 
     # ── session-title naming for a thread this adapter opened ───────────────────
@@ -2536,7 +2607,11 @@ class FluxerAdapter(BasePlatformAdapter):
         started_thread = False
         if explicit_thread_id:
             target_chat_id = explicit_thread_id
-        elif self._thread_replies_enabled_for(chat_id) and self._turn_key(chat_id, reply_to, metadata) not in self._turn_thread_disabled:
+        elif (
+            not self._turn_target_is_thread(chat_id)
+            and self._thread_replies_enabled_for(chat_id)
+            and self._turn_key(chat_id, reply_to, metadata) not in self._turn_thread_disabled
+        ):
             # The gateway sets ``reply_to`` only for a few platforms and supplies
             # no thread id for Fluxer. Prefer the trigger in hand, then the anchor
             # pinned when this turn started -- the channel's latest inbound message
@@ -2555,9 +2630,41 @@ class FluxerAdapter(BasePlatformAdapter):
                     self._disable_turn_thread(chat_id, reply_to, metadata)
         # A thread started from the triggering message already carries the parent
         # context, so a second reference inside it is redundant.
-        if reply_to and self._reply_to_mode != "off" and not started_thread:
+        if (
+            reply_to and self._reply_to_mode != "off" and not started_thread
+            and not self._reply_anchor_is_thread_starter(chat_id, reply_to)
+        ):
             payload["message_reference"] = {"message_id": str(reply_to)}
         return target_chat_id, payload, auto_thread_id
+
+    def _reply_anchor_is_thread_starter(self, chat_id: str, reply_to) -> bool:
+        """True when ``reply_to`` is the trigger message anchoring thread ``chat_id``.
+
+        A Fluxer thread created from a message renders that message as the
+        thread's system starter, and replying to a system message is rejected
+        (400 ``CANNOT_REPLY_TO_SYSTEM_MESSAGE``). The ingest-time thread path
+        addresses the turn to the thread itself, so the gateway's reply anchor
+        — the trigger's message id — points at exactly that starter. Same
+        failure class Telegram forum topics avoid by dropping the anchor
+        (core's ``_reply_anchor_for_event``).
+        """
+        anchor = str(reply_to or "").strip()
+        if not anchor:
+            return False
+        # A replay outside the live turn's context (delivery recovery) still
+        # knows the pairing: the anchor cache holds (parent, anchor) -> thread.
+        # A reverse hit also proves ``chat_id`` is that ingest-created thread.
+        for (_parent, msg), tid in self._threads_by_anchor.items():
+            if msg == anchor and str(tid) == str(chat_id):
+                return True
+        if not self._turn_target_is_thread(chat_id):
+            return False
+        context = self._turn_context.get()
+        event = context[0] if context else None
+        return bool(
+            event is not None
+            and str(getattr(event, "message_id", "") or "").strip() == anchor
+        )
 
     async def create_handoff_thread(self, parent_chat_id: str, name: str) -> Optional[str]:
         """Create a fresh Fluxer thread for a CLI→platform handoff or ``/branch``.
@@ -3884,10 +3991,19 @@ class FluxerAdapter(BasePlatformAdapter):
                 self._inbound_text_by_message.popitem(last=False)
             while len(self._inbound_author_by_message) > self._inbound_text_by_message_max:
                 self._inbound_author_by_message.popitem(last=False)
+        # One session per mention: open the turn's thread now, before the
+        # gateway resolves the session, and dispatch on the thread's id. A
+        # failed creation falls through to the shared channel session, where
+        # the send-time auto-thread path still applies.
+        ingest_thread_id: Optional[str] = None
+        if self._thread_sessions and msg_id and chat_type not in ("dm", "thread"):
+            ingest_thread_id = await self._start_thread_session_from_message(
+                channel_id, msg_id, text, author_id or None
+            )
         source = self.build_source(
-            chat_id=channel_id,
+            chat_id=ingest_thread_id or channel_id,
             chat_name=(data.get("channel") or {}).get("name"),
-            chat_type=chat_type,
+            chat_type="thread" if ingest_thread_id else chat_type,
             user_id=author_id or None,
             user_name=_author_name(author),
             guild_id=data.get("guild_id"),

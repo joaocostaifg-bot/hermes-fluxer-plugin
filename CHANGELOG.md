@@ -10,6 +10,19 @@ This project uses simple semantic versioning while the plugin is young:
 
 ## [Unreleased]
 
+### Added
+
+- Thread sessions (on by default, `FLUXER_THREAD_SESSIONS` / `thread_sessions`): a channel mention now starts its own conversation. The thread is created the moment the trigger message is accepted — before the session is resolved — and the turn runs on that thread's own session, so every `@bot` mention in a channel opens a fresh thread with a fresh session, later messages in the thread continue that session, and the auto-generated title names that thread. Previously all turns in a channel shared one long-lived session, so every thread inherited the same (stale) channel title. Disabling the flag restores the shared channel-session behavior; a failed ingest-time creation falls back to it automatically.
+
+### Fixed
+
+- Replies to a brand-new ingest-created thread no longer fail with `CANNOT_REPLY_TO_SYSTEM_MESSAGE` (which surfaced as duplicate "Recovered reply" notices). A thread created from a message renders that message as the thread's system starter, and the platform rejects reply references to system messages, so the reply reference to the trigger is now suppressed while ordinary in-thread reply references are kept.
+
+### Verification
+
+- Regression tests cover ingest-time thread creation and naming, anchor reuse without double creation, fallback on creation failure, thread-targeted sends never spawning a nested thread, and reply-reference suppression for the thread anchor (in-turn and via the anchor cache) while normal references are kept.
+- Thread-session behavior deployed and exercised live on a self-hosted Fluxer deployment (threads open per mention, sessions split); the reply-reference fix is covered by regression tests and is pending live confirmation of a clean first delivery.
+
 ## [0.5.1] - 2026-10-13
 
 ### Fixed

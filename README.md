@@ -302,11 +302,14 @@ By default Hermes should not jump into every group conversation. Useful knobs:
 | `FLUXER_FREE_RESPONSE_CHANNELS` | empty | Channels where Hermes may respond without a mention. |
 | `FLUXER_REPLY_TO_MODE` | `first` | Where the reply reference goes: `off`, `first` (first split chunk only), or `all` (every chunk). Defaults to the shared `PlatformConfig.reply_to_mode`, matching the Discord adapter; set it here to override per install. |
 | `FLUXER_THREAD_REPLIES` | `false` | Post replies in a thread started from the triggering message, in every channel. |
+| `FLUXER_THREAD_SESSIONS` | `true` | Start a fresh agent session for every channel mention: the thread is created the moment the trigger message is accepted, and the turn runs on that thread's own session. Follow-ups in the thread continue it. Set `false` to restore one shared, long-lived channel session per channel and user. |
 | `FLUXER_THREAD_REPLY_CHANNELS` | empty | Channel IDs where replies are posted in a thread started from the triggering message; other channels keep their normal behavior. |
 | `FLUXER_MENTION_PATTERNS` | empty | Extra comma-separated regexes that count as bot mentions/direct address patterns. |
 | `FLUXER_HOME_GUILD_ID` / `FLUXER_HOME_GUILDS` | empty | One or more trusted guild/community IDs used with `FLUXER_AUTO_FREE_RESPONSE_HOME_GUILD`. |
 
 Automatic threads follow the gateway turn that is actually executing, including progress, final replies and trailing attachments. Concurrent participants in one channel keep separate anchors. Standalone or scheduled sends without a gateway turn must supply `reply_to` or `metadata.reply_to_message_id` to start an automatic thread; otherwise they stay in the named channel rather than guessing from someone else's latest message. An explicit `metadata.thread_id` still takes precedence.
+
+With `FLUXER_THREAD_SESSIONS` enabled (the default), automatic threads become session boundaries as well: the thread is created at message ingest — before the gateway resolves the session — and the turn is dispatched on the thread's own id. Every mention in a channel therefore starts a fresh conversation, later messages inside that thread continue it, and the auto-generated session title names that thread instead of a channel-wide one. Each thread is shared across participants, matching normal thread semantics. If thread creation fails at ingest, the turn falls back to the shared channel session, where the send-time automatic thread still applies. Reply references to the thread's anchor message are suppressed: a thread created from a message renders that message as the thread's system starter, and replying to a system message is rejected by the platform.
 
 Thread titles use a read-only store bound to the routed or owning Hermes profile. If that profile or its title store cannot be resolved, the thread keeps its message-derived placeholder instead of reading another profile's titles.
 

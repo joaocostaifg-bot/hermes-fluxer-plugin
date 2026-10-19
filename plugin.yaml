@@ -84,6 +84,10 @@ optional_env:
     description: "Post replies in a thread started from the triggering message, in every channel (true/false)"
     prompt: "Reply in threads everywhere?"
     password: false
+  - name: FLUXER_THREAD_SESSIONS
+    description: "Fresh agent session per channel mention: the thread is created at ingest and the turn runs on the thread's own session (true/false)"
+    prompt: "New session per mention in threads?"
+    password: false
   - name: FLUXER_THREAD_REPLY_CHANNELS
     description: "Comma-separated channel IDs where replies are posted in a thread started from the triggering message"
     prompt: "Thread-reply channel IDs"

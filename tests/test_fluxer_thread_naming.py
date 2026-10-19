@@ -492,6 +492,99 @@ async def test_thread_creation_reuses_the_thread_for_the_same_anchor(state_db):
     adapter.create_thread.assert_awaited_once()
 
 
+# ── ingest-time thread sessions (one session per mention) ────────────────────
+
+@pytest.mark.asyncio
+async def test_ingest_thread_is_named_from_the_trigger_and_keyed_on_itself(state_db):
+    adapter = _adapter()
+    adapter.create_thread = AsyncMock(return_value={"id": "th-1", "name": "deploy the thing"})
+    watched: list = []
+    adapter._schedule_title_rename = lambda *args: watched.append(args)
+
+    thread_id = await adapter._start_thread_session_from_message(
+        "chan-1", "msg-1", "deploy the thing", "user-a"
+    )
+
+    assert thread_id == "th-1"
+    assert adapter.create_thread.await_args.args[:2] == ("chan-1", "deploy the thing")
+    # The turn's session is keyed on the thread, so the /title lane and the
+    # title watcher must address the thread id, not the parent channel.
+    assert adapter.auto_thread_info_for_chat("th-1") == ("th-1", "deploy the thing")
+    assert watched == [("th-1", "th-1", "deploy the thing", "user-a")]
+
+
+@pytest.mark.asyncio
+async def test_ingest_thread_reuses_the_anchor_and_never_creates_twice(state_db):
+    adapter = _adapter()
+    adapter.create_thread = AsyncMock(return_value={"id": "th-1", "name": "deploy the thing"})
+    adapter._schedule_title_rename = lambda *args: None
+
+    assert await adapter._start_thread_session_from_message("chan-1", "msg-1", "deploy") == "th-1"
+    assert await adapter._start_thread_session_from_message("chan-1", "msg-1", "deploy") == "th-1"
+    adapter.create_thread.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_ingest_thread_creation_failure_falls_back_to_the_channel(state_db):
+    adapter = _adapter()
+    adapter.create_thread = AsyncMock(side_effect=RuntimeError("api down"))
+
+    assert await adapter._start_thread_session_from_message("chan-1", "msg-1", "deploy") is None
+    assert adapter.auto_thread_info_for_chat("chan-1") is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_outbound_target_never_threads_a_thread(state_db):
+    adapter = _adapter(thread_replies=True)
+    adapter._thread_parents["th-1"] = "chan-1"
+    adapter._turn_context.set((type("E", (), {"source": type("S", (), {"chat_id": "th-1", "chat_type": "thread"})()}), "msg-1"))
+
+    target, payload, auto_thread_id = await adapter._resolve_outbound_target("th-1", None, None)
+
+    assert target == "th-1"
+    assert auto_thread_id is None
+
+
+@pytest.mark.asyncio
+async def test_reply_reference_to_the_ingest_thread_anchor_is_suppressed(state_db):
+    """The trigger anchors the ingest-created thread as its system starter; Fluxer
+    rejects replying to a system message (CANNOT_REPLY_TO_SYSTEM_MESSAGE)."""
+    adapter = _adapter(thread_replies=True)
+    event = type("E", (), {
+        "source": type("S", (), {"chat_id": "th-1", "chat_type": "thread"})(),
+        "message_id": "msg-1",
+    })()
+    adapter._turn_context.set((event, "sk"))
+
+    _target, payload, _auto = await adapter._resolve_outbound_target("th-1", "msg-1", None)
+
+    assert "message_reference" not in payload
+
+
+@pytest.mark.asyncio
+async def test_reply_reference_suppressed_via_anchor_cache_outside_the_turn(state_db):
+    adapter = _adapter(thread_replies=True)
+    adapter._threads_by_anchor[("chan-1", "msg-1")] = "th-1"
+
+    _target, payload, _auto = await adapter._resolve_outbound_target("th-1", "msg-1", None)
+
+    assert "message_reference" not in payload
+
+
+@pytest.mark.asyncio
+async def test_reply_reference_to_an_ordinary_in_thread_message_is_kept(state_db):
+    adapter = _adapter(thread_replies=True)
+    event = type("E", (), {
+        "source": type("S", (), {"chat_id": "th-1", "chat_type": "thread"})(),
+        "message_id": "msg-1",
+    })()
+    adapter._turn_context.set((event, "sk"))
+
+    _target, payload, _auto = await adapter._resolve_outbound_target("th-1", "msg-9", None)
+
+    assert payload["message_reference"] == {"message_id": "msg-9"}
+
+
 @pytest.mark.asyncio
 async def test_forget_thread_drops_the_reported_auto_thread():
     adapter = _adapter()
