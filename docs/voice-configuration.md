@@ -83,9 +83,14 @@ The supervisor is plugin-managed. Do not run `scripts/fluxer_voice_auto_join.py`
 | `stt_provider` | `FLUXER_VOICE_STT_PROVIDER` | `auto` | STT provider: `auto`, `local`, `groq`, `xai`, or `elevenlabs`. | Switch if language/accent/latency is poor. |
 | `stt_model` | `FLUXER_VOICE_STT_MODEL` | provider default | STT model name, e.g. `scribe_v2` for ElevenLabs. | Use smaller/faster models for low-power machines. |
 | `elevenlabs_language_code` | `FLUXER_VOICE_ELEVENLABS_LANGUAGE_CODE` | empty | Optional Scribe language code; empty means autodetect. | Set when autodetect hurts accuracy. |
+| `tts_provider` | `FLUXER_VOICE_TTS_PROVIDER` | `xai` | TTS engine for spoken replies: `xai` streams xAI Realtime voice; `hermes` synthesizes finished audio with the Hermes-configured TTS engine. | Set `hermes` to speak with Hermes's own configured voice instead of xAI Realtime. |
 | `tts_voice` | `FLUXER_VOICE_TTS_VOICE` | provider default | Realtime TTS voice name. | Change assistant voice/personality. |
 | `context_file` | `FLUXER_VOICE_CONTEXT_FILE` | empty | Optional local text context loaded by fast voice modes. | Use for deployment-local assistant identity or room instructions. Never commit personal context. |
 | `session_db` | `FLUXER_VOICE_SESSION_DB` | empty / Hermes default | Optional Hermes session DB for recall in full-brain mode. | Use only on the machine that owns that Hermes state. |
+
+#### Hermes TTS provider
+
+With `tts_provider: hermes`, spoken replies are synthesized by Hermes's configured TTS engine (the `tts:` section of the Hermes config, for example a local piper voice) through the same `text_to_speech_tool` entry point Hermes itself uses, so no xAI key is required for the spoken audio. This applies wherever the loop already holds the answer text: full Hermes brain answers, auto-escalated turns, and stop or brain-mode acknowledgements in any brain mode. Fast-path turns whose answer xAI Realtime would have generated itself still run through xAI Realtime end-to-end and keep requiring the xAI key. The tradeoff is non-streaming synthesis: the loop waits for the full reply to be synthesized before publishing it (speak-after-full-synthesis), so first audio is slower than xAI Realtime's streamed voice, and barge-in interruption is not applied while a hermes reply plays.
 
 ### Full Hermes brain mode
 

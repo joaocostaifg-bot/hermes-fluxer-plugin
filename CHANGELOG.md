@@ -12,6 +12,7 @@ This project uses simple semantic versioning while the plugin is young:
 
 ### Added
 
+- Voice loop hermes TTS provider (`FLUXER_VOICE_TTS_PROVIDER` / `voice.tts_provider`): the realtime voice room can now speak its replies with Hermes's configured TTS engine (for example local piper) instead of xAI Realtime. With `tts_provider: hermes`, every reply the loop already holds as text — full Hermes brain answers, auto-escalated turns, and stop or brain-mode acknowledgements in any brain mode — is synthesized through Hermes's own `text_to_speech_tool` (run off the event loop, since the tool blocks) into a temp WAV, published to the room, and cleaned up afterwards; a synthesis or publish failure is logged with full turn diagnostics and the loop keeps listening, matching the per-turn failure style of the rest of the loop. `xai` stays the default and behaves exactly as before when the variable is unset, and fast-path turns whose answer xAI Realtime generates itself still run through xAI Realtime end-to-end. The tradeoff is non-streaming audio: a hermes reply only starts speaking after the full synthesis finishes. The spoken audio itself needs no xAI key, and with the hermes brain configured the voice loop no longer requires `XAI_API_KEY` at startup.
 - Thread sessions (on by default, `FLUXER_THREAD_SESSIONS` / `thread_sessions`): a channel mention now starts its own conversation. The thread is created the moment the trigger message is accepted — before the session is resolved — and the turn runs on that thread's own session, so every `@bot` mention in a channel opens a fresh thread with a fresh session, later messages in the thread continue that session, and the auto-generated title names that thread. Previously all turns in a channel shared one long-lived session, so every thread inherited the same (stale) channel title. Disabling the flag restores the shared channel-session behavior; a failed ingest-time creation falls back to it automatically.
 
 ### Fixed
@@ -20,6 +21,7 @@ This project uses simple semantic versioning while the plugin is young:
 
 ### Verification
 
+- The hermes TTS provider change is syntax-checked (`py_compile` over the voice loop and the adapter) and deliberately leaves the default `xai` path untouched; the live voice loop was not run for this entry. The YAML knob is bridged to the child process env alongside the other voice settings.
 - Regression tests cover ingest-time thread creation and naming, anchor reuse without double creation, fallback on creation failure, thread-targeted sends never spawning a nested thread, and reply-reference suppression for the thread anchor (in-turn and via the anchor cache) while normal references are kept.
 - Thread-session behavior verified live on a self-hosted Fluxer deployment: a channel mention opens its own thread and delivers cleanly (no recovery notice), in-thread follow-ups continue that thread's session, and each thread carries its own auto-generated session title; delivery logs show no failures after the fix.
 

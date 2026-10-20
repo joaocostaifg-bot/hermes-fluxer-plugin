@@ -192,6 +192,10 @@ optional_env:
     description: "Optional ElevenLabs Scribe language code; empty allows autodetect"
     prompt: "ElevenLabs STT language code"
     password: false
+  - name: FLUXER_VOICE_TTS_PROVIDER
+    description: "Voice reply TTS engine: xai (streamed xAI Realtime voice, default) or hermes (Hermes-configured TTS, e.g. local piper)"
+    prompt: "Voice reply TTS provider"
+    password: false
   - name: FLUXER_VOICE_TTS_VOICE
     description: "Realtime TTS voice name used by the configured realtime voice provider"
     prompt: "Realtime TTS voice"

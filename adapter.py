@@ -784,6 +784,7 @@ class FluxerVoiceSupervisorProcess:
             "stt_provider": "FLUXER_VOICE_STT_PROVIDER",
             "stt_model": "FLUXER_VOICE_STT_MODEL",
             "elevenlabs_language_code": "FLUXER_VOICE_ELEVENLABS_LANGUAGE_CODE",
+            "tts_provider": "FLUXER_VOICE_TTS_PROVIDER",
             "tts_voice": "FLUXER_VOICE_TTS_VOICE",
             "context_file": "FLUXER_VOICE_CONTEXT_FILE",
             "session_db": "FLUXER_VOICE_SESSION_DB",

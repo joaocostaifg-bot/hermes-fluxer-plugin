@@ -64,6 +64,7 @@ from tools.transcription_tools import (  # noqa: E402
     is_truthy_value,
     transcribe_audio,
 )
+from tools.tts_tool import text_to_speech_tool  # noqa: E402
 from xai_realtime import XAIRealtimeVoiceClient  # noqa: E402
 
 logger = logging.getLogger("fluxer_stt_voice_loop")
@@ -688,7 +689,9 @@ async def run_stt_voice_loop(args: argparse.Namespace) -> dict[str, Any]:
     bot_token = os.getenv("FLUXER_BOT_TOKEN", "").strip()
     if not bot_token:
         raise RuntimeError("FLUXER_BOT_TOKEN is required")
-    if not os.getenv("XAI_API_KEY", "").strip():
+    # xAI Realtime is only required when it speaks the replies or still generates
+    # fast-path answers; hermes TTS with the hermes brain runs without an xAI key.
+    if (args.tts_provider != "hermes" or args.brain_provider != "hermes") and not os.getenv("XAI_API_KEY", "").strip():
         raise RuntimeError("XAI_API_KEY is required")
 
     voice_context_cache = load_voice_context_cache(args.voice_context_file)
@@ -837,6 +840,92 @@ async def run_stt_voice_loop(args: argparse.Namespace) -> dict[str, Any]:
                     prompt = build_answer_prompt(transcript, history=history, system=args.voice_system_prompt)
                     reply_text = ""
                 brain_seconds = time.monotonic() - brain_started
+
+                if args.tts_provider == "hermes" and reply_text:
+                    # Speak loop-side answer text (hermes brain answers, auto escalations,
+                    # stop/mode-switch acknowledgements) with the Hermes-configured TTS
+                    # engine instead of xAI Realtime. Non-streaming: publish after full
+                    # synthesis. Turns without loop-side text (pure xai-fast routing) still
+                    # fall through to xAI Realtime below.
+                    tts_started = time.monotonic()
+                    tts_path = Path(tempfile.gettempdir()) / f"fluxer_stt_loop_tts_{turn_no}_{int(time.time() * 1000)}.wav"
+                    spoken_path: str | None = None
+                    try:
+                        tts_envelope = json.loads(
+                            await asyncio.to_thread(text_to_speech_tool, reply_text, str(tts_path))
+                        )
+                        spoken_path = str(tts_envelope.get("file_path") or tts_path)
+                        if not tts_envelope.get("success") or not spoken_path or not Path(spoken_path).is_file():
+                            raise RuntimeError(
+                                f"Hermes TTS failed: {tts_envelope.get('error') or 'no output file produced'}"
+                            )
+                        await bridge.publish_wav_file(
+                            spoken_path,
+                            frame_ms=args.frame_ms,
+                            track_name=f"fluxer-stt-loop-reply-{turn_no}",
+                        )
+                        tts_seconds = time.monotonic() - tts_started
+                        reply_bytes = 0
+                        with contextlib.suppress(OSError):
+                            reply_bytes = Path(spoken_path).stat().st_size
+                        history.append({"user": transcript, "assistant": reply_text})
+                        turn.update(
+                            {
+                                "published": True,
+                                "tts_provider": "hermes",
+                                "brain_provider": selected_brain_provider,
+                                "brain_provider_config": args.brain_provider,
+                                "brain_route_reason": brain_route_reason,
+                                "hermes_session_id": hermes_session_id if selected_brain_provider == "hermes" else None,
+                                "hermes_session_key": hermes_session_key if selected_brain_provider == "hermes" else None,
+                                "sticky_brain_provider": sticky_brain_provider,
+                                "brain_seconds": round(brain_seconds, 3),
+                                "reply_transcript": reply_text,
+                                "reply_bytes": reply_bytes,
+                                "timing": {
+                                    "turn_seconds": round(time.monotonic() - turn_started, 3),
+                                    "stt_seconds": round(stt_seconds, 3),
+                                    "brain_seconds": round(brain_seconds, 3),
+                                    "tts_seconds": round(tts_seconds, 3),
+                                },
+                            }
+                        )
+                        result["published_turn_count"] += 1
+                        result["turns"].append(turn)
+                        append_jsonl(args.turn_log_jsonl, turn)
+                        if should_stop_after_reply:
+                            result["stop_requested"] = True
+                            break
+                        continue
+                    except Exception as exc:
+                        logger.error("Hermes TTS voice reply failed on turn %s: %s", turn_no, exc, exc_info=True)
+                        turn.update(
+                            {
+                                "published": False,
+                                "tts_provider": "hermes",
+                                "reason": "hermes_tts_failed",
+                                "error": _redact_exception_message(exc),
+                                "brain_provider": selected_brain_provider,
+                                "brain_provider_config": args.brain_provider,
+                                "brain_route_reason": brain_route_reason,
+                                "hermes_session_id": hermes_session_id if selected_brain_provider == "hermes" else None,
+                                "hermes_session_key": hermes_session_key if selected_brain_provider == "hermes" else None,
+                                "reply_transcript": reply_text,
+                                "timing": {
+                                    "turn_seconds": round(time.monotonic() - turn_started, 3),
+                                    "stt_seconds": round(stt_seconds, 3),
+                                    "brain_seconds": round(brain_seconds, 3),
+                                },
+                            }
+                        )
+                        result["ignored_turn_count"] += 1
+                        result["turns"].append(turn)
+                        append_jsonl(args.turn_log_jsonl, turn)
+                        continue
+                    finally:
+                        for cleanup_path in filter(None, (spoken_path, str(tts_path))):
+                            with contextlib.suppress(OSError):
+                                Path(cleanup_path).unlink(missing_ok=True)
 
                 voice = XAIRealtimeVoiceClient(
                     sample_rate=args.sample_rate,
@@ -1277,6 +1366,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-segment-ms", type=int, default=int(os.getenv("FLUXER_VOICE_MIN_SEGMENT_MS", "1600")))
     parser.add_argument("--max-segment-seconds", type=float, default=float(os.getenv("FLUXER_VOICE_MAX_SEGMENT_SECONDS", "12.0")))
     parser.add_argument("--voice", default=os.getenv("FLUXER_VOICE_TTS_VOICE", "eve"))
+    parser.add_argument(
+        "--tts-provider",
+        choices=("xai", "hermes"),
+        default=os.getenv("FLUXER_VOICE_TTS_PROVIDER", "xai"),
+        help="Spoken-reply TTS engine: xai streams xAI Realtime voice (default); hermes synthesizes the reply with the Hermes-configured TTS engine (e.g. local piper)",
+    )
     parser.add_argument("--brain-provider", choices=("auto", "xai-fast", "xai", "hermes"), default=os.getenv("FLUXER_VOICE_BRAIN_PROVIDER", "hermes"))
     parser.add_argument("--hermes-url", default=os.getenv("FLUXER_VOICE_HERMES_URL", "http://127.0.0.1:8642"))
     parser.add_argument("--hermes-model", default=os.getenv("FLUXER_VOICE_HERMES_MODEL") or os.getenv("API_SERVER_MODEL_NAME") or "Hermes")
