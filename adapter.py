@@ -766,6 +766,19 @@ class FluxerVoiceSupervisorProcess:
 
     def _child_env(self) -> Dict[str, str]:
         env = _voice_child_process_env(self.plugin_root)
+        # The child runs this same interpreter WITHOUT hermes_bootstrap, so it
+        # misses the managed-dependency site-packages the gateway process got
+        # (ruamel & friends). Re-add whatever site dir provides them here.
+        try:
+            import ruamel.yaml  # noqa: F401
+
+            # .../site-packages/ruamel/yaml/__init__.py -> .../site-packages
+            dep_site = str(Path(ruamel.yaml.__file__).resolve().parents[2])
+            existing = env.get("PYTHONPATH", "")
+            if dep_site not in existing.split(os.pathsep):
+                env["PYTHONPATH"] = dep_site + (os.pathsep + existing if existing else "")
+        except ImportError:
+            pass
         # Child scripts create their own FluxerAdapter instances to listen for
         # voice gateway events / perform the LiveKit handshake. Those internal
         # adapters must not start another plugin-managed supervisor from their
