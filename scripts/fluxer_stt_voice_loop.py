@@ -54,15 +54,50 @@ from scripts.fluxer_xai_room_loop import (  # noqa: E402
     _wait_for_barge_in,
 )
 from tools.transcription_common import ELEVENLABS_STT_BASE_URL  # noqa: E402
-from tools.transcription_tools import (  # noqa: E402
-    _extract_transcript_text,
-    _load_stt_config,
-    _transcribe_elevenlabs,
-    _transcribe_groq,
-    _transcribe_xai,
-    get_env_value,
-    is_truthy_value,
-    transcribe_audio,
+from tools.transcription_tools import _load_stt_config, transcribe_audio  # noqa: E402
+
+
+def _import_first(*candidates: tuple[str, str]) -> Any:
+    """Resolve a helper from wherever the installed hermes-agent provides it.
+
+    hermes-agent moved STT helpers between modules across releases
+    (transcription_tools / transcription_cloud / hermes_cli.config / utils), and
+    upstream plugin assumptions don't hold on every installed version.
+    """
+    import importlib
+
+    last_exc: Exception | None = None
+    for module_name, attr in candidates:
+        try:
+            return getattr(importlib.import_module(module_name), attr)
+        except (ImportError, AttributeError) as exc:
+            last_exc = exc
+    raise last_exc or ImportError("no candidate module resolved")
+
+
+_extract_transcript_text = _import_first(  # noqa: E402
+    ("tools.transcription_tools", "_extract_transcript_text"),
+    ("tools.transcription_cloud", "_extract_transcript_text"),
+)
+_transcribe_elevenlabs = _import_first(  # noqa: E402
+    ("tools.transcription_tools", "_transcribe_elevenlabs"),
+    ("tools.transcription_cloud", "_transcribe_elevenlabs"),
+)
+_transcribe_groq = _import_first(  # noqa: E402
+    ("tools.transcription_tools", "_transcribe_groq"),
+    ("tools.transcription_cloud", "_transcribe_groq"),
+)
+_transcribe_xai = _import_first(  # noqa: E402
+    ("tools.transcription_tools", "_transcribe_xai"),
+    ("tools.transcription_cloud", "_transcribe_xai"),
+)
+get_env_value = _import_first(  # noqa: E402
+    ("tools.transcription_tools", "get_env_value"),
+    ("hermes_cli.config", "get_env_value"),
+)
+is_truthy_value = _import_first(  # noqa: E402
+    ("tools.transcription_tools", "is_truthy_value"),
+    ("utils", "is_truthy_value"),
 )
 from tools.tts_tool import text_to_speech_tool  # noqa: E402
 from xai_realtime import XAIRealtimeVoiceClient  # noqa: E402
