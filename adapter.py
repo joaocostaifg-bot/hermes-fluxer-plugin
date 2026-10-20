@@ -141,7 +141,34 @@ def _fluxer_env(name: str, default: Any = None) -> Any:
         return os.getenv(name, default)
 
 
-def _voice_child_process_env() -> dict[str, str]:
+def _profile_scope_for_plugin_dir(plugin_root: Optional[Path]) -> Optional[Mapping[str, Any]]:
+    """Build the owning profile's secret scope from this plugin copy's location.
+
+    Multiplexed gateways install a profile's secrets only inside that profile's
+    turns; the voice supervisor starts at connect time, outside any scope. The
+    plugin copy itself identifies the profile: ``<home>/plugins/<name>`` for the
+    default profile or ``<home>/profiles/<name>/plugins/<name>`` for a secondary
+    one — so the scope is exact-profile and can never cross profiles.
+    """
+    try:
+        root = (plugin_root or Path(__file__).resolve().parent).resolve()
+        for ancestor in root.parents:
+            if ancestor.name == "plugins":
+                home = ancestor.parent
+                break
+        else:
+            return None
+        if not (home / "config.yaml").exists():
+            return None
+        from agent.secret_scope import build_profile_secret_scope
+
+        return build_profile_secret_scope(home)
+    except Exception:
+        logger.warning("Fluxer voice child: failed to build profile secret scope from %s", plugin_root, exc_info=True)
+        return None
+
+
+def _voice_child_process_env(plugin_root: Optional[Path] = None) -> dict[str, str]:
     """Build the trusted voice sidecar env without cross-profile secrets."""
     try:
         from agent.secret_scope import current_secret_scope, is_multiplex_active
@@ -151,6 +178,8 @@ def _voice_child_process_env() -> dict[str, str]:
     else:
         multiplexed = bool(is_multiplex_active())
         scope = current_secret_scope() if multiplexed else None
+    if multiplexed and scope is None:
+        scope = _profile_scope_for_plugin_dir(plugin_root)
     if multiplexed and scope is None:
         raise RuntimeError("Fluxer voice child environment requires an active Hermes profile scope")
 
@@ -736,7 +765,7 @@ class FluxerVoiceSupervisorProcess:
         return [python, str(self.plugin_root / "scripts" / "fluxer_voice_auto_join.py")]
 
     def _child_env(self) -> Dict[str, str]:
-        env = _voice_child_process_env()
+        env = _voice_child_process_env(self.plugin_root)
         # Child scripts create their own FluxerAdapter instances to listen for
         # voice gateway events / perform the LiveKit handshake. Those internal
         # adapters must not start another plugin-managed supervisor from their
