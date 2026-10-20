@@ -119,7 +119,7 @@ Conversation rules:
 - For pleasant small talk, respond warmly and stop.
 - No filler greetings unless the user greeted you.
 - Correct obvious ASR homophones when context is clear, e.g. "past", "plast", or "plastic" can mean "plus" in arithmetic.
-- Default to English unless the user explicitly asks for another language or clearly speaks another language.
+- Reply in the same language the user spoke in the transcript; for short or ambiguous utterances default to European Portuguese (the user is Portuguese).
 """.strip()
 
 
@@ -805,6 +805,7 @@ async def run_stt_voice_loop(args: argparse.Namespace) -> dict[str, Any]:
                             timeout=args.capture_timeout,
                         )
                 except (TimeoutError, asyncio.TimeoutError):
+                    logger.info("capture timeout turn=%s after %.1fs; remote identities now: %s", turn_no, args.capture_timeout, [getattr(_p, "identity", None) for _p in getattr(bridge._room, "remote_participants", {}).values()] if getattr(bridge, "_room", None) else "no-room")
                     turn = {
                         "turn": turn_no,
                         "published": False,

@@ -355,6 +355,17 @@ class FluxerLiveKitSmokeBridge:
             info.guild_id or "<dm>",
             info.connection_id or "<none>",
         )
+        try:
+            for _rp in (getattr(room, "remote_participants", {}) or {}).values():
+                _pubs = getattr(_rp, "track_publications", {}) or {}
+                logger.info(
+                    "Fluxer LiveKit remote participant identity=%s tracks=%s track_attached=%s",
+                    getattr(_rp, "identity", None),
+                    [str(getattr(_pub, "kind", "?")) for _pub in _pubs.values()],
+                    [getattr(_pub, "track", None) is not None for _pub in _pubs.values()],
+                )
+        except Exception:
+            logger.exception("remote participant listing failed")
         return info
 
     async def publish_test_tone(
