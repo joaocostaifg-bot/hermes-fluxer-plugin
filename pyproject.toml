@@ -11,6 +11,7 @@ authors = [
 dependencies = [
   "httpx>=0.24",
   "websockets>=11",
+  "livekit>=1.1.10",
 ]
 
 [project.urls]
