@@ -12,6 +12,8 @@ dependencies = [
   "httpx>=0.24",
   "websockets>=11",
   "livekit>=1.1.10",
+  "edge-tts>=7",
+  "mistralai>=1",
 ]
 
 [project.urls]
