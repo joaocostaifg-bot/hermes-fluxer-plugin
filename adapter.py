@@ -668,6 +668,22 @@ def _open_session_store(home: Optional[Path] = None) -> Optional[Any]:
         return None
 
 
+def _is_thread_already_created_error(exc: BaseException) -> bool:
+    """True when ``exc`` means another actor already opened this anchor's thread.
+
+    Two adapter processes can legitimately race to start the same thread: the
+    gateway and the voice auto-join supervisor both ingest mentions, and only
+    one create wins. The loser must adopt the winner's thread rather than
+    silently dropping the turn back to the parent channel.
+    """
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if status != 400:
+        return False
+    body = str(getattr(response, "text", "") or "").lower()
+    return "thread_already_created_for_message" in body
+
+
 def _is_missing_channel_error(exc: BaseException) -> bool:
     """True when ``exc`` means the target channel or thread no longer exists.
 
@@ -2254,6 +2270,35 @@ class FluxerAdapter(BasePlatformAdapter):
             self._remember_mentioned_thread(thread_id)
         return thread_id
 
+    async def _recover_thread_for_anchor(
+        self, chat_id: str, message_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch the thread another actor already opened for this anchor message.
+
+        The Fluxer message object embeds the thread started from it, so the
+        create-race loser can adopt the winner's thread instead of dropping the
+        turn back to the parent channel. ``None`` keeps the channel fallback.
+        """
+        if not message_id:
+            return None
+        try:
+            data = await self._request(
+                "GET",
+                f"/channels/{_quote_id(chat_id)}/messages/{_quote_id(str(message_id))}",
+                warn_on_error=False,
+            )
+        except Exception as exc:
+            logger.debug(
+                "Fluxer anchor fetch failed for %s/%s: %s", chat_id, message_id, exc
+            )
+            return None
+        thread = (data or {}).get("thread")
+        if not isinstance(thread, dict):
+            return None
+        if not str(thread.get("id") or "").strip():
+            return None
+        return thread
+
     async def _start_thread_from_message(self, chat_id: str, message_id: str) -> Optional[str]:
         """Best-effort thread start from ``message_id``; ``None`` keeps the channel.
 
@@ -2280,8 +2325,18 @@ class FluxerAdapter(BasePlatformAdapter):
                 str(chat_id), thread_name, message_id=str(message_id)
             )
         except Exception as exc:
-            logger.debug("Fluxer thread start failed for %s/%s: %s", chat_id, message_id, exc)
-            return None
+            if not _is_thread_already_created_error(exc):
+                logger.debug("Fluxer thread start failed for %s/%s: %s", chat_id, message_id, exc)
+                return None
+            # A second adapter process (e.g. the voice supervisor) created this
+            # thread first; adopt it rather than replying in the parent channel.
+            data = await self._recover_thread_for_anchor(chat_id, message_id)
+            if data is None:
+                logger.debug(
+                    "Fluxer thread start raced for %s/%s and the anchor fetch failed",
+                    chat_id, message_id,
+                )
+                return None
         thread_id = self._remember_thread_id(data, chat_id)
         if thread_id:
             self._threads_by_anchor[key] = thread_id
@@ -2320,10 +2375,21 @@ class FluxerAdapter(BasePlatformAdapter):
                 str(chat_id), placeholder, message_id=str(message_id)
             )
         except Exception as exc:
-            logger.debug(
-                "Fluxer ingest thread start failed for %s/%s: %s", chat_id, message_id, exc
-            )
-            return None
+            if not _is_thread_already_created_error(exc):
+                logger.debug(
+                    "Fluxer ingest thread start failed for %s/%s: %s", chat_id, message_id, exc
+                )
+                return None
+            # A second adapter process (e.g. the voice supervisor) created the
+            # ingest thread first; adopt it so the session still keys on the
+            # thread instead of the shared channel session.
+            data = await self._recover_thread_for_anchor(chat_id, message_id)
+            if data is None:
+                logger.debug(
+                    "Fluxer ingest thread start raced for %s/%s and the anchor fetch failed",
+                    chat_id, message_id,
+                )
+                return None
         thread_id = self._remember_thread_id(data, chat_id)
         if not thread_id:
             return None

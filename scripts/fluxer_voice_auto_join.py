@@ -356,6 +356,11 @@ async def run(args: argparse.Namespace) -> int:
                 "allow_all_users": env_truthy("FLUXER_ALLOW_ALL_USERS"),
                 "gateway_state_updates": False,
                 "voice": {"supervisor_disabled": True},
+                # This supervisor only watches VOICE_STATE_UPDATE. Without this,
+                # its adapter ingests the same mentions as the gateway's adapter
+                # and races it to create the ingest thread, so the gateway loses
+                # the create and drops the turn into the shared channel session.
+                "thread_sessions": False,
             },
         )
     )

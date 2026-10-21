@@ -52,6 +52,57 @@ async def test_failed_creation_keeps_parent_for_text_and_upload_but_not_next_tur
     assert adapter._request.await_args.args[1] == "/channels/next-thread/messages"
 
 
+class _RaceAlreadyCreated(RuntimeError):
+    def __init__(self):
+        import httpx
+
+        request = httpx.Request(
+            "POST", "https://fluxer.test/api/v1/channels/channel/messages/anchor/threads"
+        )
+        response = httpx.Response(
+            400,
+            request=request,
+            json={
+                "code": "THREAD_ALREADY_CREATED_FOR_MESSAGE",
+                "message": "A thread has already been created for this message.",
+            },
+        )
+        super().__init__("already created")
+        self.response = response
+
+
+@pytest.mark.asyncio
+async def test_thread_create_race_adopts_existing_thread(monkeypatch):
+    """A lost create race must reuse the winner's thread, not the parent channel.
+
+    The gateway and the voice auto-join supervisor both ingest mentions; when
+    the supervisor wins the thread create, the gateway used to fall back to the
+    shared channel session, so the session and the reply both landed in the
+    channel instead of the thread.
+    """
+    monkeypatch.setattr(fluxer_adapter, "_open_session_store", lambda home=None: Titles())
+    adapter = make_adapter()
+    adapter.create_thread = AsyncMock(side_effect=_RaceAlreadyCreated())
+    adapter._request = AsyncMock(
+        return_value={"id": "anchor", "thread": {"id": "race-thread", "name": "dog"}}
+    )
+
+    # Ingest-time path: the session must key on the adopted thread.
+    thread_id = await adapter._start_thread_session_from_message("channel", "anchor", "hello")
+    assert thread_id == "race-thread"
+    assert adapter._threads_by_anchor[("channel", "anchor")] == "race-thread"
+
+    # Send-time path adopts the same thread after a cache loss.
+    adapter._threads_by_anchor.clear()
+    assert await adapter._start_thread_from_message("channel", "anchor") == "race-thread"
+
+    # Any other create failure still falls back to the channel.
+    adapter.create_thread = AsyncMock(side_effect=RuntimeError("temporary rejection"))
+    adapter._request = AsyncMock(return_value={"id": "anchor", "thread": None})
+    assert await adapter._start_thread_session_from_message("channel", "anchor2", "hello") is None
+    assert await adapter._start_thread_from_message("channel", "anchor2") is None
+
+
 def test_temporary_reader_failure_recovers_after_bounded_retry(monkeypatch):
     clock = [100.0]
     monkeypatch.setattr(fluxer_adapter.time, "monotonic", lambda: clock[0])

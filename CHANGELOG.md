@@ -18,6 +18,7 @@ This project uses simple semantic versioning while the plugin is young:
 ### Fixed
 
 - Replies to a brand-new ingest-created thread no longer fail with `CANNOT_REPLY_TO_SYSTEM_MESSAGE` (which surfaced as duplicate "Recovered reply" notices). A thread created from a message renders that message as the thread's system starter, and the platform rejects reply references to system messages, so the reply reference to the trigger is now suppressed while ordinary in-thread reply references are kept.
+- A lost ingest-thread create race no longer drops the turn into the shared channel session. When a second adapter process runs alongside the gateway (the voice auto-join supervisor ingests the same MESSAGE_CREATE events), both race to create the mention's thread and the loser used to treat `THREAD_ALREADY_CREATED_FOR_MESSAGE` as a generic failure, silently falling back to the parent channel — so the session, the reply, and the auto-title all landed in the channel instead of the thread. Both thread-start paths (ingest-time and send-time) now detect that specific error, recover the winner's thread via the anchor message's embedded `thread` object, and adopt it with full bookkeeping (anchor cache, parent mapping, mentioned-thread memory, title scheduling). The voice auto-join supervisor additionally sets `thread_sessions: false` on its own adapter, since it only needs VOICE_STATE_UPDATE and should never race the gateway at all. Regression test simulates the race end-to-end for both paths, including the non-race failure fallback.
 
 ### Verification
 
